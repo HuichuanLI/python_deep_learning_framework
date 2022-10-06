@@ -318,3 +318,114 @@ for i in range(len(grads)):
 
 print("grads", grads[0])
 print("numerical_grads", numerical_grads[0])
+
+
+def sigmoid(x):
+    return (1 / (1 + np.exp(-x)))
+
+
+def lstm_cell(x, hc, w_ih, w_hh, b_ih, b_hh):
+    h, c = hc[0], hc[1]
+    hidden_size = w_ih.shape[1] // 4
+    ifgo_Z = np.dot(x, w_ih) + b_ih + np.dot(h, w_hh) + b_hh
+    i = sigmoid(ifgo_Z[:, :hidden_size])
+    f = sigmoid(ifgo_Z[:, hidden_size:2 * hidden_size])
+    g = np.tanh(ifgo_Z[:, 2 * hidden_size:3 * hidden_size])
+    o = sigmoid(ifgo_Z[:, 3 * hidden_size:])
+    c_ = f * c + i * g
+    h_ = o * np.tanh(c_)
+    return (h_, c_), np.column_stack((i, f, g, o))
+
+
+def lstm_cell_back(dhc, ifgo, x, hc_pre, w_ih, w_hh, b_ih, b_hh):
+    hidden_size = w_ih.shape[1] // 4
+    if isinstance(dhc, tuple):
+        dh_, dc_next = dhc
+    else:
+        dh_ = dhc
+        dc_next = np.zeros_like(dh_)
+    h_pre, c = hc_pre
+    i, f, g, o = ifgo[:, :hidden_size], ifgo[:, hidden_size:2 * hidden_size] \
+        , ifgo[:, 2 * hidden_size:3 * hidden_size], ifgo[:, 3 * hidden_size:]
+    c_ = f * c + i * g
+    dc_ = dc_next + dh_ * o * (1 - np.square(np.tanh(c_)))
+    do = dh_ * np.tanh(c_)
+    di = dc_ * g
+    dg = dc_ * i
+    df = dc_ * c
+
+    diz = i * (1 - i) * di
+    dfz = f * (1 - f) * df
+    dgz = (1 - np.square(g)) * dg
+    doz = o * (1 - o) * do
+
+    dZ = np.column_stack((diz, dfz, dgz, doz))
+
+    dW_ih = np.dot(x.T, dZ)
+    dW_hh = np.dot(h_pre.T, dZ)
+    db_hh = np.sum(dZ, axis=0, keepdims=True)
+    db_ih = np.sum(dZ, axis=0, keepdims=True)
+    dx = np.dot(dZ, w_ih.T)
+    dh_pre = np.dot(dZ, w_hh.T)
+    # return dx,dh_pre,(dW_ih,dW_hh,db_ih,db_hh)
+    dc = dc_ * f
+    return dx, (dh_pre, dc), (dW_ih, dW_hh, db_ih, db_hh)
+
+
+class LSTMCell(RNNCellBase):
+    """   \begin{array}{ll}
+        i = \sigma(W_{ii} x + b_{ii} + W_{hi} h + b_{hi}) \\
+        f = \sigma(W_{if} x + b_{if} + W_{hf} h + b_{hf}) \\
+        g = \tanh(W_{ig} x + b_{ig} + W_{hg} h + b_{hg}) \\
+        o = \sigma(W_{io} x + b_{io} + W_{ho} h + b_{ho}) \\
+        c' = f * c + i * g \\
+        h' = o * \tanh(c') \\
+        \end{array}
+
+        Inputs: input, (h_0, c_0)
+        If `(h_0, c_0)` is not provided, both **h_0** and **c_0** default to zero.
+
+        Outputs: (h_1, c_1)
+        - **h_1** of shape `(batch, hidden_size)`: tensor containing the next hidden state
+          for each element in the batch
+        - **c_1** of shape `(batch, hidden_size)`: tensor containing the next cell state
+          for each element in the batch
+        """
+
+    def __init__(self, input_size, hidden_size, bias=True):
+        super(LSTMCell, self).__init__(input_size, hidden_size, bias, num_chunks=4)
+
+    def init_hidden(batch_size):
+        zeros = np.zeros(input.shape[0], self.hidden_size, dtype=input.dtype)
+        return (zeros, zeros)  # np.array([zeros, zeros])
+
+    def forward(self, input, h=None):
+        self.check_forward_input(input)
+        if h is None:
+            h = init_hidden(input.shape[0])
+            # zeros= np.zeros(input.shape[0], self.hidden_size, dtype=input.dtype)
+            # h = (zeros, zeros)#np.array([zeros, zeros])
+        self.check_forward_hidden(input, h[0], '[0]')
+        self.check_forward_hidden(input, h[1], '[1]')
+        return lstm_cell(
+            input, h,
+            self.W_ih, self.W_hh,
+            self.b_ih, self.b_hh,
+        )
+
+    def __call__(self, input, h=None):
+        return self.forward(input, h)
+
+    def backward(self, dhc, ifgo, input, hc_pre):
+        if hc_pre is None:
+            hc_pre = init_hidden(input.shape[0])
+        dx, dh_pre, grads = lstm_cell_back(
+            dhc, ifgo,
+            input, hc_pre,
+            self.W_ih, self.W_hh,
+            self.b_ih, self.b_hh)
+
+        # grads = (dW_ih,dW_hh,db_ih,db_hh)
+        for a, b in zip(self.grads, grads):
+            a += b
+        return dx, dh_pre, grads
